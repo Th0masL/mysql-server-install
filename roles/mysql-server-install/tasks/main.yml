@@ -1,0 +1,139 @@
+---
+
+- name: "Run apt-update to refresh the APT package list"
+  apt:
+    update_cache: yes
+  changed_when: False
+
+- name: "Check if MySQL is installed or not"
+  shell: dpkg -l | grep "mysql-server" | head -10
+  changed_when: False
+  register: dpkg_result
+
+- name: "Show the version of MySQL Server that is already installed"
+  vars:
+    msg: "{{ dpkg_result.stdout }}"
+  debug:
+    msg: "{{ msg.split('\n') }}"
+
+- name: "Check which version of MYSQL is available through APT"
+  shell: apt-cache search mysql-server | grep "^mysql-server-[0-9]"
+  changed_when: False
+  register: apt_mysql_details
+
+- name: "Show the available version of mysql-server on APT"
+  vars:
+    msg: "{{ apt_mysql_details.stdout }}"
+  debug:
+    msg: "{{ msg.split('\n') }}"
+
+- name: "Make sure that we don't have any folder called lost+found in the MySQL folder /var/lib/mysql (often present when /var/lib/mysql is a symlink for a mounted folder from another disk/partition)"
+  file:
+    path: "/var/lib/mysql/lost+found"
+    state: absent
+
+- name: "Add the block [client] in the file /root/.my.cnf, so the root user can access MySQL without having to authenticate"
+  lineinfile:
+    path: /root/.my.cnf
+    line: "[client]"
+    regexp: "^.client.$"
+    create: yes
+
+- name: "Add the password in the file /root/.my.cnf"
+  lineinfile:
+    path: /root/.my.cnf
+    line: "password = {{ mysql_root_pw }}"
+    regexp: "^password = "
+    insertafter: "^.client.$"
+
+- name: Set MySQL root password in debconf before installing
+  debconf:
+    name: mysql-server
+    question: mysql-server/root_password
+    value: "{{ mysql_root_pw }}"
+    vtype: password
+  when: dpkg_result.stdout == ""
+
+- name: Confirm MySQL root password in debconf before installing
+  debconf:
+    name: mysql-server
+    question: mysql-server/root_password_again
+    value: "{{ mysql_root_pw }}"
+    vtype: password
+  when: dpkg_result.stdout == ""
+
+- name: "Install mysql-server with APT if not already installed"
+  apt:
+    name: mysql-server
+    state: present
+  when: dpkg_result.stdout == ""
+
+- name: "Stop MySQL Service to fix the rights on the folder /var/lib/mysql"
+  service:
+    name: mysql
+    state: stopped
+  when: dpkg_result.stdout == ""
+
+- name: "Make sure that the folder /var/lib/mysql is owned by mysql user/group and has the correct permissions"
+  file:
+    dest: /var/lib/mysql
+    owner: mysql
+    group: mysql
+    mode: u=rwX,g=rwX,o-rwx
+    recurse: yes
+  when: dpkg_result.stdout == ""
+
+- name: "Start MySQL Service after fixing the rights on the folder /var/lib/mysql"
+  service:
+    name: mysql
+    state: started
+  when: dpkg_result.stdout == ""
+
+- name: "Unset the MySQL root password in debconf"
+  debconf:
+    name: mysql-server
+    question: mysql-server/root_password
+    value: ""
+    vtype: text
+
+- name: "Unset the configration of the MySQL root password in debconf"
+  debconf:
+    name: mysql-server
+    question: mysql-server/root_password_again
+    value: ""
+    vtype: text
+
+- name: "Install libdbd-mysql-perl with APT"
+  apt:
+    name: libdbd-mysql-perl
+    state: present
+
+- name: "Install libmysqlclient-dev with APT"
+  apt:
+    name: libmysqlclient-dev
+    state: present
+
+- name: "Install MySQL-python with PIP"
+  pip:
+    name: mysql-python
+
+- name: "Install percona-toolkit with APT"
+  apt:
+    name: percona-toolkit
+    state: present
+
+- name: Remove the test database
+  mysql_db:
+    name: test
+    state: absent
+
+- name: "Extract the list of users"
+  shell: "mysql -e 'SELECT User,Host FROM mysql.user\\G;'"
+  register: mysql_users
+  changed_when: False
+
+- name: "Show the users that exist on this server"
+  vars:
+    msg: "{{ mysql_users.stdout }}"
+  debug:
+    msg: "{{ msg.split('\n') }}"
