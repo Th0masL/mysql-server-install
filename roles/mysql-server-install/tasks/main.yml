@@ -27,10 +27,20 @@
   debug:
     msg: "{{ msg.split('\n') }}"
 
-- name: "Make sure that we don't have any folder called lost+found in the MySQL folder /var/lib/mysql (often present when /var/lib/mysql is a symlink for a mounted folder from another disk/partition)"
+- name: "Make sure that we don't have any folder called lost+found in the MySQL data folder (often present when the MySQL Data folder is a symlink for a mounted folder from another disk/partition)"
   file:
-    path: "/var/lib/mysql/lost+found"
+    path: "{{ mysql_data_folder }}/lost+found"
     state: absent
+
+- name: "Check if the file /root/.my.cnf exist or not"
+  stat:
+    path: /root/.my.cnf
+  register: mycnf_file
+
+- name: "If the file doesn't exist, generate a random password"
+  set_fact:
+    mysql_root_pw: "{{ lookup('password', '/dev/null chars=ascii_letters,digits') }}"
+  when: mycnf_file.stat.exists is defined and mycnf_file.stat.exists == False
 
 - name: "Add the block [client] in the file /root/.my.cnf, so the root user can access MySQL without having to authenticate"
   lineinfile:
@@ -38,6 +48,7 @@
     line: "[client]"
     regexp: "^.client.$"
     create: yes
+  when: mycnf_file.stat.exists is defined and mycnf_file.stat.exists == False
 
 - name: "Add the password in the file /root/.my.cnf"
   lineinfile:
@@ -45,6 +56,19 @@
     line: "password = {{ mysql_root_pw }}"
     regexp: "^password = "
     insertafter: "^.client.$"
+  when: mycnf_file.stat.exists is defined and mycnf_file.stat.exists == False
+
+- name: "Get the password from the file if the file was already here"
+  shell: "cat /root/.my.cnf | grep '^password = ' | awk -F ' = ' '{print $2}' | head -1"
+  register: pw_from_existing_file
+  when: mycnf_file.stat.exists is defined and mycnf_file.stat.exists == True
+  changed_when: False
+
+- name: "Save the password in a nice variable"
+  set_fact:
+    mysql_root_pw: "{{ pw_from_existing_file.stdout }}"
+  when: mycnf_file.stat.exists is defined and mycnf_file.stat.exists == True
+  failed_when: pw_from_existing_file.stdout == ""
 
 - name: Set MySQL root password in debconf before installing
   debconf:
@@ -68,27 +92,6 @@
     state: present
   when: dpkg_result.stdout == ""
 
-- name: "Stop MySQL Service to fix the rights on the folder /var/lib/mysql"
-  service:
-    name: mysql
-    state: stopped
-  when: dpkg_result.stdout == ""
-
-- name: "Make sure that the folder /var/lib/mysql is owned by mysql user/group and has the correct permissions"
-  file:
-    dest: /var/lib/mysql
-    owner: mysql
-    group: mysql
-    mode: u=rwX,g=rwX,o-rwx
-    recurse: yes
-  when: dpkg_result.stdout == ""
-
-- name: "Start MySQL Service after fixing the rights on the folder /var/lib/mysql"
-  service:
-    name: mysql
-    state: started
-  when: dpkg_result.stdout == ""
-
 - name: "Unset the MySQL root password in debconf"
   debconf:
     name: mysql-server
@@ -103,6 +106,125 @@
     value: ""
     vtype: text
 
+- name: "Check if the expected data folder {{ mysql_data_folder }} exists"
+  stat:
+    path: "{{ mysql_data_folder }}"
+  register: mysql_data_dir
+
+- name: "Force the playbook to fail if we can't find the expected data folder"
+  debug:
+    msg: "Unable to find the expected data folder {{ mysql_data_folder }}. Please verify that this folder exists."
+  when: mysql_data_dir.stat.isdir is not defined or mysql_data_dir.stat.isdir == False
+  failed_when: True
+
+- name: "Check if the data folder /var/lib/mysql exist"
+  stat:
+    path: /var/lib/mysql
+  register: default_data_dir
+
+- name: "Stop MySQL Service if we need to move the data folder"
+  service:
+    name: mysql
+    state: stopped
+  when:
+    - mysql_data_folder != ""
+    - mysql_data_folder != "/var/lib/mysql"
+    - default_data_dir.stat.isdir is defined
+    - default_data_dir.stat.isdir == True
+
+- name: "If the expected installation folder is different than the default one, move the data"
+  shell: "cp -rap /var/lib/mysql {{ mysql_data_folder }}"
+  when:
+    - mysql_data_folder != ""
+    - mysql_data_folder != "/var/lib/mysql"
+    - default_data_dir.stat.isdir is defined
+    - default_data_dir.stat.isdir == True
+
+- name: "Check if the file /etc/my.cnf exist"
+  stat:
+    path: /etc/my.cnf
+  register: etcmycnf
+
+- name: "If the expected installation folder is different than the default one, update the path of the files in /etc/my.cnf"
+  replace:
+    path: /etc/my.cnf
+    replace: "{{ mysql_data_folder }}"
+    regexp: "/var/lib/mysql"
+  when:
+    - mysql_data_folder != ""
+    - mysql_data_folder != "/var/lib/mysql"
+    - etcmycnf.stat.exists is defined and etcmycnf.stat.exists == True
+
+- name: "Check if the file /etc/mysql/mysql.conf.d/mysqld.cnf exist"
+  stat:
+    path: /etc/mysql/mysql.conf.d/mysqld.cnf
+  register: etcmysqlconfdcnf
+
+- name: "If the expected installation folder is different than the default one, update the path of the files in /etc/mysql/mysql.conf.d/mysqld.cnf"
+  replace:
+    path: /etc/mysql/mysql.conf.d/mysqld.cnf
+    replace: "{{ mysql_data_folder }}"
+    regexp: "/var/lib/mysql"
+  when:
+    - mysql_data_folder != ""
+    - mysql_data_folder != "/var/lib/mysql"
+    - etcmysqlconfdcnf.stat.exists is defined and etcmysqlconfdcnf.stat.exists == True
+
+- name: "Check if the file /etc/apparmor.d/usr.sbin.mysqld exist"
+  stat:
+    path: /etc/apparmor.d/usr.sbin.mysqld
+  register: apparmor_mysqld
+
+- name: "If the expected installation folder is different than the default one, update the path of the files in /etc/apparmor.d/usr.sbin.mysqld"
+  replace:
+    path: /etc/apparmor.d/usr.sbin.mysqld
+    replace: "{{ mysql_data_folder }}/"
+    regexp: "/var/lib/mysql/"
+  when:
+    - mysql_data_folder != ""
+    - mysql_data_folder != "/var/lib/mysql"
+    - apparmor_mysqld.stat.exists is defined and apparmor_mysqld.stat.exists == True
+  register: apparmor_result
+
+- name: "If we have edited the apparmor file, restart the service"
+  service:
+    name: apparmor
+    state: restarted
+  when: apparmor_result.changed == True
+
+- name: "If we wanted to move the data folder, make sure that the original data folder is gone"
+  file:
+    path: /var/lib/mysql
+    state: absent
+  when: mysql_data_folder != "" and mysql_data_folder != "/var/lib/mysql"
+
+- name: "Make sure that the data folder {{ mysql_data_folder }} is owned by mysql user/group and has the correct permissions"
+  file:
+    dest: "{{ mysql_data_folder }}"
+    owner: mysql
+    group: mysql
+    mode: u=rwX,g=rwX,o-rwx
+    recurse: yes
+  when: dpkg_result.stdout == ""
+
+- name: "Update the systemd file to prevent the service to start if the data folder {{ mysql_data_folder }} is not reachable"
+  lineinfile:
+    path: /lib/systemd/system/mysql.service
+    line: "ConditionPathExists={{ mysql_data_folder }}"
+    regexp: "^ConditionPathExists="
+    insertbefore: "^ExecStartPre="
+  register: systemd_edit_result
+
+- name: "Reload systemd daemon if changes have been made"
+  systemd:
+    daemon_reload: yes
+  when: systemd_edit_result.changed == True
+
+- name: "Start MySQL Service"
+  service:
+    name: mysql
+    state: started
+
 - name: "Install libdbd-mysql-perl with APT"
   apt:
     name: libdbd-mysql-perl
@@ -113,13 +235,14 @@
     name: libmysqlclient-dev
     state: present
 
-- name: "Install MySQL-python with PIP"
-  pip:
-    name: mysql-python
-
 - name: "Install percona-toolkit with APT"
   apt:
     name: percona-toolkit
+    state: present
+
+- name: "Install python-mysqldb with APT"
+  apt:
+    name: python-mysqldb
     state: present
 
 - name: Remove the test database

@@ -1,0 +1,5 @@
+---
+# Set the folder where we want the MySQL Data to be located.
+# Default is /var/lib/mysql
+# Do not add the last /
+mysql_data_folder: "/data/mysql"

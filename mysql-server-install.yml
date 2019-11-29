@@ -6,4 +6,4 @@
   become_user: root
 
   roles:
-    - mysql-server-install.yml
+    - mysql-server-install
